@@ -15,11 +15,12 @@ import os
 
 # ── Database Setup ───────────────────────────────────────────────────────────
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip().strip('"').strip("'")
 
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL)
+    # psycopg2 needs the URI passed as the dsn keyword argument
+    conn = psycopg2.connect(dsn=DATABASE_URL)
     return conn
 
 
