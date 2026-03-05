@@ -150,7 +150,7 @@ function AddCompanyModal({ open, onClose, onCreated }) {
 function AddJobModal({ open, onClose, onCreated, companies }) {
   const [form, setForm] = useState({
     company_id: '', title: '', location: '', role_type: 'full-time',
-    salary_range: '', job_url: '', date_posted: '', status: 'saved',
+    salary_range: '', job_url: '', date_posted: '', status: 'saved', notes: '',
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -165,9 +165,10 @@ function AddJobModal({ open, onClose, onCreated, companies }) {
         ...form, company_id: Number(form.company_id),
         location: form.location || null, salary_range: form.salary_range || null,
         job_url: form.job_url || null, date_posted: form.date_posted || null,
+        notes: form.notes || null,
       });
       onCreated();
-      setForm({ company_id: '', title: '', location: '', role_type: 'full-time', salary_range: '', job_url: '', date_posted: '', status: 'saved' });
+      setForm({ company_id: '', title: '', location: '', role_type: 'full-time', salary_range: '', job_url: '', date_posted: '', status: 'saved', notes: '' });
       onClose();
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
@@ -219,6 +220,11 @@ function AddJobModal({ open, onClose, onCreated, companies }) {
             {STATUSES.map((s) => <option key={s} value={s}>{STATUS_CONFIG[s].label}</option>)}
           </select>
         </div>
+        <div>
+          <label className="block text-sm font-medium text-zinc-900 mb-1.5">Notes</label>
+          <textarea className="input-field min-h-[80px] resize-y" placeholder="e.g. Referred by Sarah, apply before March 15…"
+            value={form.notes} onChange={set('notes')} />
+        </div>
         {error && <p className="text-sm text-red-600">{error}</p>}
         <div className="flex justify-end gap-3 pt-2">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
@@ -235,7 +241,7 @@ function AddJobModal({ open, onClose, onCreated, companies }) {
 
 function AddContactModal({ open, onClose, onCreated, companies }) {
   const [form, setForm] = useState({
-    company_id: '', name: '', title: '', linkedin_url: '', email: '', phone: '',
+    company_id: '', name: '', title: '', linkedin_url: '', email: '', phone: '', notes: '', last_contacted: '',
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -250,9 +256,10 @@ function AddContactModal({ open, onClose, onCreated, companies }) {
         ...form, company_id: Number(form.company_id),
         title: form.title || null, linkedin_url: form.linkedin_url || null,
         email: form.email || null, phone: form.phone || null,
+        notes: form.notes || null, last_contacted: form.last_contacted || null,
       });
       onCreated();
-      setForm({ company_id: '', name: '', title: '', linkedin_url: '', email: '', phone: '' });
+      setForm({ company_id: '', name: '', title: '', linkedin_url: '', email: '', phone: '', notes: '', last_contacted: '' });
       onClose();
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
@@ -292,6 +299,15 @@ function AddContactModal({ open, onClose, onCreated, companies }) {
             <input className="input-field" type="tel" placeholder="+1 (555) 123-4567" value={form.phone} onChange={set('phone')} />
           </div>
         </div>
+        <div>
+          <label className="block text-sm font-medium text-zinc-900 mb-1.5">Last Contacted</label>
+          <input className="input-field" type="date" value={form.last_contacted} onChange={set('last_contacted')} />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-zinc-900 mb-1.5">Notes</label>
+          <textarea className="input-field min-h-[80px] resize-y" placeholder="e.g. Met at MBA networking event, interested in referring…"
+            value={form.notes} onChange={set('notes')} />
+        </div>
         {error && <p className="text-sm text-red-600">{error}</p>}
         <div className="flex justify-end gap-3 pt-2">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
@@ -306,7 +322,14 @@ function AddContactModal({ open, onClose, onCreated, companies }) {
 
 // ── Contacts Table ──────────────────────────────────────────────────────────
 
-function ContactsTable({ contacts, onDelete }) {
+function ContactsTable({ contacts, onDelete, onMarkContacted }) {
+  const getDaysSince = (dateStr) => {
+    if (!dateStr) return -1;
+    const d = new Date(dateStr);
+    const now = new Date();
+    return Math.floor((now - d) / (1000 * 60 * 60 * 24));
+  };
+
   return (
     <div className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
       <div className="overflow-x-auto">
@@ -318,12 +341,16 @@ function ContactsTable({ contacts, onDelete }) {
               <th className="text-left px-4 py-3 font-medium text-zinc-500 text-xs uppercase tracking-wide">Company</th>
               <th className="text-left px-4 py-3 font-medium text-zinc-500 text-xs uppercase tracking-wide">Contact Info</th>
               <th className="text-left px-4 py-3 font-medium text-zinc-500 text-xs uppercase tracking-wide">LinkedIn</th>
-              <th className="text-left px-4 py-3 font-medium text-zinc-500 text-xs uppercase tracking-wide">Added</th>
-              <th className="w-12"></th>
+              <th className="text-left px-4 py-3 font-medium text-zinc-500 text-xs uppercase tracking-wide">Last Contacted</th>
+              <th className="text-left px-4 py-3 font-medium text-zinc-500 text-xs uppercase tracking-wide">Notes</th>
+              <th className="w-20"></th>
             </tr>
           </thead>
           <tbody>
-            {contacts.map((ct) => (
+            {contacts.map((ct) => {
+              const daysSince = getDaysSince(ct.last_contacted);
+              const needsFollowUp = daysSince === -1 || daysSince >= 14;
+              return (
               <tr key={ct.id} className="border-b border-zinc-100 hover:bg-zinc-50/50 transition-colors group">
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2.5">
@@ -358,7 +385,27 @@ function ContactsTable({ contacts, onDelete }) {
                     </a>
                   ) : <span className="text-zinc-300 text-xs">—</span>}
                 </td>
-                <td className="px-4 py-3 text-zinc-500 text-xs">{ct.created_at?.split('T')[0]}</td>
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    {needsFollowUp ? (
+                      <span className="flex items-center gap-1 text-xs text-amber-600 font-medium">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        {daysSince === -1 ? 'Never contacted' : `${daysSince}d ago`}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-zinc-500">{daysSince}d ago</span>
+                    )}
+                    <button onClick={() => onMarkContacted(ct.id)}
+                      className="text-xs text-blue-600 hover:underline opacity-0 group-hover:opacity-100 transition-opacity">
+                      Mark today
+                    </button>
+                  </div>
+                </td>
+                <td className="px-4 py-3 max-w-[200px]">
+                  {ct.notes ? (
+                    <p className="text-xs text-zinc-500 truncate" title={ct.notes}>{ct.notes}</p>
+                  ) : <span className="text-zinc-300 text-xs">—</span>}
+                </td>
                 <td className="px-4 py-3 text-right">
                   <button onClick={() => onDelete(ct.id)}
                     className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg hover:bg-red-50 text-zinc-300 hover:text-red-500 transition-all">
@@ -366,7 +413,8 @@ function ContactsTable({ contacts, onDelete }) {
                   </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -470,6 +518,10 @@ function KanbanCard({ job, status, onStatusChange, onDelete }) {
         <Badge type={job.role_type} />
       </div>
 
+      {job.notes && (
+        <p className="text-xs text-zinc-400 mt-2 line-clamp-2 italic" title={job.notes}>{job.notes}</p>
+      )}
+
       {/* Move & Delete actions */}
       <div className="flex items-center justify-between mt-3 pt-2.5 border-t border-zinc-100">
         <div className="relative">
@@ -509,7 +561,7 @@ function KanbanCard({ job, status, onStatusChange, onDelete }) {
 function AnalyticsDashboard({ analytics }) {
   if (!analytics) return <div className="text-center py-12 text-zinc-400">Loading analytics…</div>;
 
-  const { funnel, by_company, by_role, stale_jobs, pipeline } = analytics;
+  const { funnel, by_company, by_role, stale_jobs, stale_contacts, pipeline } = analytics;
   const total = funnel.saved || 0;
 
   return (
@@ -619,6 +671,26 @@ function AnalyticsDashboard({ analytics }) {
                 <span className="text-amber-900">{j.title} <span className="text-amber-600">at {j.company_name}</span></span>
                 <span className="text-xs text-amber-600 flex items-center gap-1">
                   <Clock className="w-3 h-3" /> {j.days_stale} days ago
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Stale Contacts */}
+      {(stale_contacts || []).length > 0 && (
+        <div className="bg-blue-50 rounded-xl border border-blue-200 p-6">
+          <h3 className="text-sm font-semibold text-blue-800 mb-3 flex items-center gap-2">
+            <Users className="w-4 h-4" /> Follow Up — Contacts needing outreach
+          </h3>
+          <div className="space-y-2">
+            {stale_contacts.map((ct) => (
+              <div key={ct.id} className="flex items-center justify-between text-sm">
+                <span className="text-blue-900">{ct.name} {ct.title && <span className="text-blue-600">({ct.title})</span>} <span className="text-blue-500">at {ct.company_name}</span></span>
+                <span className="text-xs text-blue-600 flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  {ct.days_since_contact === -1 ? 'Never contacted' : `${ct.days_since_contact}d since last contact`}
                 </span>
               </div>
             ))}
@@ -793,6 +865,13 @@ export default function App() {
     if (!confirm('Delete this contact?')) return;
     await api.deleteContact(id);
     fetchData();
+  };
+
+  const handleMarkContacted = async (id) => {
+    try {
+      await api.updateContact(id, { last_contacted: new Date().toISOString().split('T')[0] });
+      fetchData();
+    } catch (e) { console.error('Failed to mark contacted:', e); }
   };
 
   const filteredContacts = contacts.filter((ct) => {
@@ -974,7 +1053,7 @@ export default function App() {
                   </button>
                 )} />
             ) : (
-              <ContactsTable contacts={filteredContacts} onDelete={handleDeleteContact} />
+              <ContactsTable contacts={filteredContacts} onDelete={handleDeleteContact} onMarkContacted={handleMarkContacted} />
             )}
           </>
         )}

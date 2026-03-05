@@ -1,91 +1,111 @@
 """
 Job Opportunity Tracker — FastAPI Backend
-A lightweight API for tracking job opportunities across multiple companies.
-Now with application pipeline and analytics.
+PostgreSQL-backed API for tracking job opportunities across multiple companies.
+With application pipeline, contacts CRM, and analytics.
 """
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import datetime, date
-import sqlite3
+from datetime import datetime
+import psycopg2
+import psycopg2.extras
 import os
 
 # ── Database Setup ───────────────────────────────────────────────────────────
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "jobs.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
+
+
+def dict_rows(cursor):
+    """Convert cursor results to list of dicts."""
+    columns = [desc[0] for desc in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def dict_row(cursor):
+    """Convert single cursor result to dict."""
+    columns = [desc[0] for desc in cursor.description]
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return dict(zip(columns, row))
 
 
 def init_db():
     conn = get_db()
-    conn.executescript("""
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS companies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
             career_page_url TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TIMESTAMP DEFAULT NOW()
         );
-
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             title TEXT NOT NULL,
             location TEXT,
             role_type TEXT CHECK(role_type IN ('full-time', 'internship', 'contract', 'part-time', 'other')),
             salary_range TEXT,
             job_url TEXT,
             date_posted DATE,
-            date_added TEXT DEFAULT (datetime('now')),
+            date_added TIMESTAMP DEFAULT NOW(),
             status TEXT NOT NULL DEFAULT 'saved' CHECK(status IN ('saved', 'applied', 'interviewing', 'offer', 'rejected')),
-            status_updated_at TEXT DEFAULT (datetime('now')),
-            applied_date TEXT,
-            FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+            status_updated_at TIMESTAMP DEFAULT NOW(),
+            applied_date TIMESTAMP,
+            notes TEXT
         );
-
-        CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs(company_id);
-        CREATE INDEX IF NOT EXISTS idx_jobs_role_type ON jobs(role_type);
-        CREATE INDEX IF NOT EXISTS idx_jobs_location ON jobs(location);
-        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs(company_id);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_role_type ON jobs(role_type);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_location ON jobs(location);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);")
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS contacts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             title TEXT,
             linkedin_url TEXT,
             email TEXT,
             phone TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+            notes TEXT,
+            last_contacted TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
         );
-
-        CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
     """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);")
 
-    # Migration: add columns if they don't exist (for existing databases)
-    try:
-        conn.execute("SELECT status FROM jobs LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT NOT NULL DEFAULT 'saved'")
-        conn.execute("ALTER TABLE jobs ADD COLUMN status_updated_at TEXT DEFAULT (datetime('now'))")
-        conn.execute("ALTER TABLE jobs ADD COLUMN applied_date TEXT")
+    # Migrations: add new columns if they don't exist
+    for migration in [
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notes TEXT",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS notes TEXT",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS last_contacted TIMESTAMP",
+    ]:
+        try:
+            cur.execute(migration)
+        except Exception:
+            conn.rollback()
 
     conn.commit()
+    cur.close()
     conn.close()
 
 
 # ── Pydantic Models ──────────────────────────────────────────────────────────
 
 VALID_STATUSES = ['saved', 'applied', 'interviewing', 'offer', 'rejected']
+
 
 class CompanyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
@@ -109,6 +129,7 @@ class JobCreate(BaseModel):
     job_url: Optional[str] = None
     date_posted: Optional[str] = None
     status: Optional[str] = "saved"
+    notes: Optional[str] = None
 
 
 class JobUpdate(BaseModel):
@@ -120,6 +141,7 @@ class JobUpdate(BaseModel):
     date_posted: Optional[str] = None
     company_id: Optional[int] = None
     status: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class StatusUpdate(BaseModel):
@@ -133,6 +155,8 @@ class ContactCreate(BaseModel):
     linkedin_url: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    notes: Optional[str] = None
+    last_contacted: Optional[str] = None
 
 
 class ContactUpdate(BaseModel):
@@ -142,6 +166,8 @@ class ContactUpdate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     company_id: Optional[int] = None
+    notes: Optional[str] = None
+    last_contacted: Optional[str] = None
 
 
 class ContactOut(BaseModel):
@@ -153,6 +179,8 @@ class ContactOut(BaseModel):
     linkedin_url: Optional[str]
     email: Optional[str]
     phone: Optional[str]
+    notes: Optional[str]
+    last_contacted: Optional[str]
     created_at: str
 
 
@@ -170,11 +198,33 @@ class JobOut(BaseModel):
     status: str
     status_updated_at: Optional[str]
     applied_date: Optional[str]
+    notes: Optional[str]
+
+
+# ── Helper to stringify timestamps ───────────────────────────────────────────
+
+def stringify_row(row_dict):
+    """Convert datetime/date objects to strings for JSON serialization."""
+    if row_dict is None:
+        return None
+    result = {}
+    for k, v in row_dict.items():
+        if isinstance(v, datetime):
+            result[k] = v.isoformat()
+        elif hasattr(v, 'isoformat'):
+            result[k] = v.isoformat()
+        else:
+            result[k] = v
+    return result
+
+
+def stringify_rows(rows):
+    return [stringify_row(r) for r in rows]
 
 
 # ── FastAPI App ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Job Opportunity Tracker", version="2.0.0")
+app = FastAPI(title="Job Opportunity Tracker", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -195,43 +245,52 @@ def startup():
 @app.get("/api/companies", response_model=list[CompanyOut])
 def list_companies():
     conn = get_db()
-    rows = conn.execute("""
+    cur = conn.cursor()
+    cur.execute("""
         SELECT c.*, COUNT(j.id) as job_count
         FROM companies c
         LEFT JOIN jobs j ON j.company_id = c.id
         GROUP BY c.id
         ORDER BY c.name
-    """).fetchall()
+    """)
+    rows = stringify_rows(dict_rows(cur))
+    cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return rows
 
 
 @app.post("/api/companies", response_model=CompanyOut, status_code=201)
 def create_company(company: CompanyCreate):
     conn = get_db()
+    cur = conn.cursor()
     try:
-        cur = conn.execute(
-            "INSERT INTO companies (name, career_page_url) VALUES (?, ?)",
+        cur.execute(
+            "INSERT INTO companies (name, career_page_url) VALUES (%s, %s) RETURNING id",
             (company.name.strip(), company.career_page_url),
         )
+        new_id = cur.fetchone()[0]
         conn.commit()
-        row = conn.execute(
-            "SELECT *, 0 as job_count FROM companies WHERE id = ?", (cur.lastrowid,)
-        ).fetchone()
-        return dict(row)
-    except sqlite3.IntegrityError:
+        cur.execute("SELECT *, 0 as job_count FROM companies WHERE id = %s", (new_id,))
+        row = stringify_row(dict_row(cur))
+        return row
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
         raise HTTPException(status_code=409, detail="Company already exists")
     finally:
+        cur.close()
         conn.close()
 
 
 @app.delete("/api/companies/{company_id}", status_code=204)
 def delete_company(company_id: int):
     conn = get_db()
-    cur = conn.execute("DELETE FROM companies WHERE id = ?", (company_id,))
+    cur = conn.cursor()
+    cur.execute("DELETE FROM companies WHERE id = %s", (company_id,))
+    deleted = cur.rowcount
     conn.commit()
+    cur.close()
     conn.close()
-    if cur.rowcount == 0:
+    if deleted == 0:
         raise HTTPException(status_code=404, detail="Company not found")
 
 
@@ -246,6 +305,7 @@ def list_jobs(
     status: Optional[str] = Query(None),
 ):
     conn = get_db()
+    cur = conn.cursor()
     query = """
         SELECT j.*, c.name as company_name
         FROM jobs j
@@ -255,54 +315,61 @@ def list_jobs(
     params = []
 
     if company_id:
-        query += " AND j.company_id = ?"
+        query += " AND j.company_id = %s"
         params.append(company_id)
     if role_type:
-        query += " AND j.role_type = ?"
+        query += " AND j.role_type = %s"
         params.append(role_type)
     if location:
-        query += " AND LOWER(j.location) LIKE LOWER(?)"
+        query += " AND LOWER(j.location) LIKE LOWER(%s)"
         params.append(f"%{location}%")
     if search:
-        query += " AND (LOWER(j.title) LIKE LOWER(?) OR LOWER(c.name) LIKE LOWER(?))"
+        query += " AND (LOWER(j.title) LIKE LOWER(%s) OR LOWER(c.name) LIKE LOWER(%s))"
         params.extend([f"%{search}%", f"%{search}%"])
     if status:
-        query += " AND j.status = ?"
+        query += " AND j.status = %s"
         params.append(status)
 
     query += " ORDER BY j.date_added DESC"
 
-    rows = conn.execute(query, params).fetchall()
+    cur.execute(query, params)
+    rows = stringify_rows(dict_rows(cur))
+    cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return rows
 
 
 @app.post("/api/jobs", response_model=JobOut, status_code=201)
 def create_job(job: JobCreate):
     conn = get_db()
-    company = conn.execute("SELECT id, name FROM companies WHERE id = ?", (job.company_id,)).fetchone()
-    if not company:
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM companies WHERE id = %s", (job.company_id,))
+    if cur.fetchone() is None:
+        cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Company not found")
 
     status = job.status if job.status in VALID_STATUSES else "saved"
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
     applied_date = now if status == "applied" else None
 
-    cur = conn.execute(
-        """INSERT INTO jobs (company_id, title, location, role_type, salary_range, job_url, date_posted, status, status_updated_at, applied_date)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    cur.execute(
+        """INSERT INTO jobs (company_id, title, location, role_type, salary_range, job_url, date_posted, status, status_updated_at, applied_date, notes)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (job.company_id, job.title.strip(), job.location, job.role_type,
-         job.salary_range, job.job_url, job.date_posted, status, now, applied_date),
+         job.salary_range, job.job_url, job.date_posted, status, now, applied_date, job.notes),
     )
+    new_id = cur.fetchone()[0]
     conn.commit()
-    row = conn.execute(
+    cur.execute(
         """SELECT j.*, c.name as company_name FROM jobs j
-           JOIN companies c ON c.id = j.company_id WHERE j.id = ?""",
-        (cur.lastrowid,),
-    ).fetchone()
+           JOIN companies c ON c.id = j.company_id WHERE j.id = %s""",
+        (new_id,),
+    )
+    row = stringify_row(dict_row(cur))
+    cur.close()
     conn.close()
-    return dict(row)
+    return row
 
 
 @app.patch("/api/jobs/{job_id}/status", response_model=JobOut)
@@ -311,33 +378,41 @@ def update_job_status(job_id: int, body: StatusUpdate):
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {VALID_STATUSES}")
 
     conn = get_db()
-    existing = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+    existing = dict_row(cur)
     if not existing:
+        cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Job not found")
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
     applied_date = now if body.status == "applied" and not existing["applied_date"] else existing["applied_date"]
 
-    conn.execute(
-        "UPDATE jobs SET status = ?, status_updated_at = ?, applied_date = ? WHERE id = ?",
+    cur.execute(
+        "UPDATE jobs SET status = %s, status_updated_at = %s, applied_date = %s WHERE id = %s",
         (body.status, now, applied_date, job_id),
     )
     conn.commit()
-    row = conn.execute(
+    cur.execute(
         """SELECT j.*, c.name as company_name FROM jobs j
-           JOIN companies c ON c.id = j.company_id WHERE j.id = ?""",
+           JOIN companies c ON c.id = j.company_id WHERE j.id = %s""",
         (job_id,),
-    ).fetchone()
+    )
+    row = stringify_row(dict_row(cur))
+    cur.close()
     conn.close()
-    return dict(row)
+    return row
 
 
 @app.put("/api/jobs/{job_id}", response_model=JobOut)
 def update_job(job_id: int, job: JobUpdate):
     conn = get_db()
-    existing = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+    existing = dict_row(cur)
     if not existing:
+        cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -346,32 +421,37 @@ def update_job(job_id: int, job: JobUpdate):
         raise HTTPException(status_code=400, detail="No fields to update")
 
     if "status" in updates:
-        updates["status_updated_at"] = datetime.utcnow().isoformat()
+        updates["status_updated_at"] = datetime.utcnow()
         if updates["status"] == "applied" and not existing["applied_date"]:
-            updates["applied_date"] = datetime.utcnow().isoformat()
+            updates["applied_date"] = datetime.utcnow()
 
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
     values = list(updates.values()) + [job_id]
 
-    conn.execute(f"UPDATE jobs SET {set_clause} WHERE id = ?", values)
+    cur.execute(f"UPDATE jobs SET {set_clause} WHERE id = %s", values)
     conn.commit()
 
-    row = conn.execute(
+    cur.execute(
         """SELECT j.*, c.name as company_name FROM jobs j
-           JOIN companies c ON c.id = j.company_id WHERE j.id = ?""",
+           JOIN companies c ON c.id = j.company_id WHERE j.id = %s""",
         (job_id,),
-    ).fetchone()
+    )
+    row = stringify_row(dict_row(cur))
+    cur.close()
     conn.close()
-    return dict(row)
+    return row
 
 
 @app.delete("/api/jobs/{job_id}", status_code=204)
 def delete_job(job_id: int):
     conn = get_db()
-    cur = conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    cur = conn.cursor()
+    cur.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+    deleted = cur.rowcount
     conn.commit()
+    cur.close()
     conn.close()
-    if cur.rowcount == 0:
+    if deleted == 0:
         raise HTTPException(status_code=404, detail="Job not found")
 
 
@@ -383,6 +463,7 @@ def list_contacts(
     search: Optional[str] = Query(None),
 ):
     conn = get_db()
+    cur = conn.cursor()
     query = """
         SELECT ct.*, c.name as company_name
         FROM contacts ct
@@ -392,48 +473,58 @@ def list_contacts(
     params = []
 
     if company_id:
-        query += " AND ct.company_id = ?"
+        query += " AND ct.company_id = %s"
         params.append(company_id)
     if search:
-        query += " AND (LOWER(ct.name) LIKE LOWER(?) OR LOWER(ct.title) LIKE LOWER(?) OR LOWER(c.name) LIKE LOWER(?))"
+        query += " AND (LOWER(ct.name) LIKE LOWER(%s) OR LOWER(ct.title) LIKE LOWER(%s) OR LOWER(c.name) LIKE LOWER(%s))"
         params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
 
     query += " ORDER BY ct.created_at DESC"
 
-    rows = conn.execute(query, params).fetchall()
+    cur.execute(query, params)
+    rows = stringify_rows(dict_rows(cur))
+    cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return rows
 
 
 @app.post("/api/contacts", response_model=ContactOut, status_code=201)
 def create_contact(contact: ContactCreate):
     conn = get_db()
-    company = conn.execute("SELECT id, name FROM companies WHERE id = ?", (contact.company_id,)).fetchone()
-    if not company:
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM companies WHERE id = %s", (contact.company_id,))
+    if cur.fetchone() is None:
+        cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Company not found")
 
-    cur = conn.execute(
-        """INSERT INTO contacts (company_id, name, title, linkedin_url, email, phone)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+    cur.execute(
+        """INSERT INTO contacts (company_id, name, title, linkedin_url, email, phone, notes, last_contacted)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (contact.company_id, contact.name.strip(), contact.title,
-         contact.linkedin_url, contact.email, contact.phone),
+         contact.linkedin_url, contact.email, contact.phone, contact.notes, contact.last_contacted),
     )
+    new_id = cur.fetchone()[0]
     conn.commit()
-    row = conn.execute(
+    cur.execute(
         """SELECT ct.*, c.name as company_name FROM contacts ct
-           JOIN companies c ON c.id = ct.company_id WHERE ct.id = ?""",
-        (cur.lastrowid,),
-    ).fetchone()
+           JOIN companies c ON c.id = ct.company_id WHERE ct.id = %s""",
+        (new_id,),
+    )
+    row = stringify_row(dict_row(cur))
+    cur.close()
     conn.close()
-    return dict(row)
+    return row
 
 
 @app.put("/api/contacts/{contact_id}", response_model=ContactOut)
 def update_contact(contact_id: int, contact: ContactUpdate):
     conn = get_db()
-    existing = conn.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM contacts WHERE id = %s", (contact_id,))
+    existing = dict_row(cur)
     if not existing:
+        cur.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Contact not found")
 
@@ -441,28 +532,33 @@ def update_contact(contact_id: int, contact: ContactUpdate):
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
     values = list(updates.values()) + [contact_id]
 
-    conn.execute(f"UPDATE contacts SET {set_clause} WHERE id = ?", values)
+    cur.execute(f"UPDATE contacts SET {set_clause} WHERE id = %s", values)
     conn.commit()
 
-    row = conn.execute(
+    cur.execute(
         """SELECT ct.*, c.name as company_name FROM contacts ct
-           JOIN companies c ON c.id = ct.company_id WHERE ct.id = ?""",
+           JOIN companies c ON c.id = ct.company_id WHERE ct.id = %s""",
         (contact_id,),
-    ).fetchone()
+    )
+    row = stringify_row(dict_row(cur))
+    cur.close()
     conn.close()
-    return dict(row)
+    return row
 
 
 @app.delete("/api/contacts/{contact_id}", status_code=204)
 def delete_contact(contact_id: int):
     conn = get_db()
-    cur = conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+    cur = conn.cursor()
+    cur.execute("DELETE FROM contacts WHERE id = %s", (contact_id,))
+    deleted = cur.rowcount
     conn.commit()
+    cur.close()
     conn.close()
-    if cur.rowcount == 0:
+    if deleted == 0:
         raise HTTPException(status_code=404, detail="Contact not found")
 
 
@@ -471,15 +567,17 @@ def delete_contact(contact_id: int):
 @app.get("/api/analytics")
 def get_analytics():
     conn = get_db()
+    cur = conn.cursor()
 
     # Pipeline counts
     pipeline = {}
-    for row in conn.execute("SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status"):
-        pipeline[row["status"]] = row["cnt"]
+    cur.execute("SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status")
+    for row in cur.fetchall():
+        pipeline[row[0]] = row[1]
 
     # By company
     by_company = []
-    for row in conn.execute("""
+    cur.execute("""
         SELECT c.name, c.id,
                COUNT(j.id) as total,
                SUM(CASE WHEN j.status = 'applied' THEN 1 ELSE 0 END) as applied,
@@ -488,39 +586,46 @@ def get_analytics():
                SUM(CASE WHEN j.status = 'rejected' THEN 1 ELSE 0 END) as rejected
         FROM companies c
         LEFT JOIN jobs j ON j.company_id = c.id
-        GROUP BY c.id
-        HAVING total > 0
-        ORDER BY total DESC
-    """):
-        by_company.append(dict(row))
+        GROUP BY c.id, c.name
+        HAVING COUNT(j.id) > 0
+        ORDER BY COUNT(j.id) DESC
+    """)
+    for row in dict_rows(cur):
+        by_company.append(row)
 
     # By role type
     by_role = []
-    for row in conn.execute("""
+    cur.execute("""
         SELECT role_type, COUNT(*) as total,
                SUM(CASE WHEN status IN ('applied', 'interviewing', 'offer') THEN 1 ELSE 0 END) as active
-        FROM jobs GROUP BY role_type ORDER BY total DESC
-    """):
-        by_role.append(dict(row))
+        FROM jobs GROUP BY role_type ORDER BY COUNT(*) DESC
+    """)
+    for row in dict_rows(cur):
+        by_role.append(row)
 
     # Weekly activity (jobs added per week, last 8 weeks)
     weekly = []
-    for row in conn.execute("""
-        SELECT strftime('%Y-W%W', date_added) as week,
+    cur.execute("""
+        SELECT TO_CHAR(date_added, 'IYYY-"W"IW') as week,
                COUNT(*) as added,
                SUM(CASE WHEN status != 'saved' THEN 1 ELSE 0 END) as acted_on
         FROM jobs
-        WHERE date_added >= datetime('now', '-56 days')
+        WHERE date_added >= NOW() - INTERVAL '56 days'
         GROUP BY week
         ORDER BY week
-    """):
-        weekly.append(dict(row))
+    """)
+    for row in dict_rows(cur):
+        weekly.append(row)
 
     # Conversion funnel
-    total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    applied = conn.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('applied', 'interviewing', 'offer', 'rejected')").fetchone()[0]
-    interviewing = conn.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('interviewing', 'offer')").fetchone()[0]
-    offers = conn.execute("SELECT COUNT(*) FROM jobs WHERE status = 'offer'").fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM jobs")
+    total = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('applied', 'interviewing', 'offer', 'rejected')")
+    applied = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('interviewing', 'offer')")
+    interviewing = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM jobs WHERE status = 'offer'")
+    offers = cur.fetchone()[0]
 
     funnel = {
         "saved": total,
@@ -534,18 +639,40 @@ def get_analytics():
 
     # Stale jobs (saved for 7+ days, not acted on)
     stale = []
-    for row in conn.execute("""
+    cur.execute("""
         SELECT j.id, j.title, c.name as company_name, j.date_added,
-               CAST(julianday('now') - julianday(j.date_added) AS INTEGER) as days_stale
+               EXTRACT(DAY FROM NOW() - j.date_added)::INTEGER as days_stale
         FROM jobs j
         JOIN companies c ON c.id = j.company_id
         WHERE j.status = 'saved'
-        AND julianday('now') - julianday(j.date_added) >= 7
+        AND j.date_added <= NOW() - INTERVAL '7 days'
         ORDER BY j.date_added ASC
         LIMIT 10
-    """):
-        stale.append(dict(row))
+    """)
+    for row in dict_rows(cur):
+        row = stringify_row(row)
+        stale.append(row)
 
+    # Stale contacts (not contacted in 14+ days, or never contacted)
+    stale_contacts = []
+    cur.execute("""
+        SELECT ct.id, ct.name, ct.title, c.name as company_name, ct.last_contacted,
+               CASE
+                   WHEN ct.last_contacted IS NULL THEN -1
+                   ELSE EXTRACT(DAY FROM NOW() - ct.last_contacted)::INTEGER
+               END as days_since_contact
+        FROM contacts ct
+        JOIN companies c ON c.id = ct.company_id
+        WHERE ct.last_contacted IS NULL
+           OR ct.last_contacted <= NOW() - INTERVAL '14 days'
+        ORDER BY ct.last_contacted ASC NULLS FIRST
+        LIMIT 10
+    """)
+    for row in dict_rows(cur):
+        row = stringify_row(row)
+        stale_contacts.append(row)
+
+    cur.close()
     conn.close()
 
     return {
@@ -555,6 +682,7 @@ def get_analytics():
         "weekly": weekly,
         "funnel": funnel,
         "stale_jobs": stale,
+        "stale_contacts": stale_contacts,
         "total_companies": len(by_company),
         "total_jobs": total,
     }
